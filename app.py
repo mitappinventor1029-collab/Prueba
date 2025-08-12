@@ -54,7 +54,7 @@ def um3u_proxy(url_path):
 
     try:
         start_time = time.time()
-        r = requests.get(target_url, headers=headers, stream=True, timeout=30)
+        r = requests.get(target_url, headers=headers, stream=True, timeout=(10, 300))
         content_type = r.headers.get('Content-Type', '')
 
         logger.info(f"[PROXY] Status: {r.status_code}, Content-Type: {content_type}")
@@ -94,6 +94,11 @@ def um3u_proxy(url_path):
                         if chunk:
                             bytes_sent += len(chunk)
                             yield chunk
+                        else:
+                            # Enviar un salto de línea cada 1 seg para mantener conexión viva
+                            import time
+                            time.sleep(1)
+                            yield b'\n'
                 finally:
                     elapsed = time.time() - start_time
                     logger.info(f"[PROXY] Enviado {bytes_sent} bytes en {elapsed:.2f} segundos para {url_path}")
@@ -129,5 +134,6 @@ def not_found(error):
                          base_url=BASE_URL_UM3U), 404
 
 if __name__ == '__main__':
-    # Run on port 5000 as per Flask guidelines, with threading for concurrent connections
-    app.run(host='0.0.0.0', port=5000, threaded=True, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    app.run(host='0.0.0.0', port=port, threaded=True, debug=debug)
