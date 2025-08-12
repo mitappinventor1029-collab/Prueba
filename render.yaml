@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: proxy-um3u
+    env: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: SESSION_SECRET
+        value: 28698
