@@ -5,14 +5,31 @@ import time
 import logging
 import os
 
-# Configure logging for debugging
+# Configurar logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key-change-in-production")
 
-# Headers para u.m3uts.xyz
+# Headers para distintos hosts
+HEADERS_TV_M3U = {
+    "Accept-Encoding": "gzip",
+    "Connection": "Keep-Alive",
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Host": "tv.m3uts.xyz",
+    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 14; RMX3630 Build/UKQ1.230924.001)"
+}
+
+HEADERS_MAGMA = {
+    "Connection": "Keep-Alive",
+    "Host": "magmaplayer.com",
+    "User-Agent": "Magma Player/9",
+    "X-Did": "fb6fd3030f4146b7",
+    "X-Hash": "Aquí_va_el_hash_correcto",  # Actualiza con tu hash real
+    "X-Version": "9/1.0.8"
+}
+
 HEADERS_UM3U = {
     "Accept-Encoding": "gzip",
     "Connection": "Keep-Alive",
@@ -23,34 +40,77 @@ HEADERS_UM3U = {
     "X-Version": "10/1.0.7"
 }
 
+BASE_URL_TV_M3U = "http://tv.m3uts.xyz/"
 BASE_URL_UM3U = "http://u.m3uts.xyz/"
 
+# Ruta de status/index
 @app.route('/')
 def index():
-    """Show proxy server status page"""
     return render_template('index.html', 
-                         host_url=request.host_url,
-                         base_url=BASE_URL_UM3U)
+                           host_url=request.host_url,
+                           base_url=BASE_URL_UM3U)
 
-@app.route('/<path:url_path>')
-def um3u_proxy(url_path):
-    """
-    Main proxy handler for multimedia streaming
-    Supports M3U8 playlists and video segments with URL rewriting
-    """
-    # Parse the URL path to determine target
+# Ruta específica para tv.m3uts.xyz stream/gen/<canal_id>
+@app.route('/tv.m3uts.xyz/stream/gen/<canal_id>', methods=["GET"])
+def proxy_tv_gen(canal_id):
+    payload = {
+        "id": canal_id,
+        "cast": "false",
+        "device": "fb6fd3030f4146b7",
+        "code": "200"
+    }
+
+    logger.info(f"[PROXY] POST a {BASE_URL_TV_M3U}stream/gen/{canal_id} con payload {payload}")
+    r_post = requests.post(f"{BASE_URL_TV_M3U}stream/gen/{canal_id}", headers=HEADERS_TV_M3U, data=payload)
+    if r_post.status_code != 200:
+        return f"Error {r_post.status_code} en POST", 500
+
+    url_m3u8 = r_post.text.strip()
+    logger.info(f"[PROXY] URL m3u8 recibida: {url_m3u8}")
+
+    r_get = requests.get(url_m3u8, headers=HEADERS_MAGMA)
+    if r_get.status_code != 200:
+        return f"Error {r_get.status_code} al obtener m3u8", 500
+
+    playlist = r_get.text
+    new_playlist = ""
+
+    for line in playlist.splitlines():
+        if line.strip() and not line.startswith("#"):
+            abs_url = line.strip()
+            parsed = urlparse(abs_url)
+            proxied_url = request.host_url + parsed.netloc + parsed.path
+            if parsed.query:
+                proxied_url += "?" + parsed.query
+            new_playlist += proxied_url + "\n"
+        else:
+            new_playlist += line + "\n"
+
+    return Response(new_playlist, content_type="application/vnd.apple.mpegurl")
+
+# Proxy general para multimedia y streaming
+@app.route('/<path:url_path>', methods=["GET"])
+def general_proxy(url_path):
+    # Determinar target URL para u.m3uts.xyz o general
     parts = url_path.split("/", 1)
     if len(parts) == 2 and "." in parts[0]:
         domain, path = parts
         target_url = f"http://{domain}/{path}"
     else:
+        # Por defecto usa u.m3uts.xyz base URL para paths sin dominio
         target_url = urljoin(BASE_URL_UM3U, url_path)
 
     logger.info(f"[PROXY] Cliente pidió: /{url_path}")
     logger.info(f"[PROXY] Reenviando a: {target_url}")
 
-    # Use specific headers for u.m3uts.xyz domain
-    headers = HEADERS_UM3U if "u.m3uts.xyz" in target_url else {"User-Agent": "Ultimate Player/1.0.7"}
+    # Definir headers según dominio
+    if "magmaplayer.com" in target_url:
+        headers = HEADERS_MAGMA
+    elif "u.m3uts.xyz" in target_url:
+        headers = HEADERS_UM3U
+    else:
+        # User-Agent genérico para otros
+        headers = {"User-Agent": "Ultimate Player/1.0.7"}
 
     try:
         start_time = time.time()
@@ -59,7 +119,6 @@ def um3u_proxy(url_path):
 
         logger.info(f"[PROXY] Status: {r.status_code}, Content-Type: {content_type}")
 
-        # Handle M3U8 playlist files with URL rewriting
         if url_path.endswith(".m3u8"):
             playlist = r.text
             logger.debug("Contenido playlist recibido (primeros 500 caracteres):\n%s", playlist[:500])
@@ -67,7 +126,6 @@ def um3u_proxy(url_path):
             new_playlist = ""
             for line in playlist.splitlines():
                 if line.strip() and not line.startswith("#"):
-                    # Rewrite URLs to point through this proxy
                     abs_url = line.strip()
                     parsed = urlparse(abs_url)
                     proxied_url = request.host_url + parsed.netloc + parsed.path
@@ -77,13 +135,11 @@ def um3u_proxy(url_path):
                 else:
                     new_playlist += line + "\n"
 
-            # Clean up response headers
             excluded_headers = ['content-encoding', 'transfer-encoding', 'connection']
             response_headers = [(k, v) for k, v in r.headers.items() if k.lower() not in excluded_headers]
 
             return Response(new_playlist, content_type="application/vnd.apple.mpegurl", headers=response_headers)
 
-        # Handle video segments (.ts files) with streaming
         if url_path.endswith(".ts"):
             logger.info(f"[PROXY] Segmento de vídeo detectado: {url_path}")
 
@@ -95,27 +151,23 @@ def um3u_proxy(url_path):
                             bytes_sent += len(chunk)
                             yield chunk
                         else:
-                            # Enviar un salto de línea cada 1 seg para mantener conexión viva
-                            import time
                             time.sleep(1)
                             yield b'\n'
                 finally:
                     elapsed = time.time() - start_time
                     logger.info(f"[PROXY] Enviado {bytes_sent} bytes en {elapsed:.2f} segundos para {url_path}")
 
-            # Clean up problematic headers for streaming
             excluded_headers = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
                                 'te', 'trailers', 'transfer-encoding', 'upgrade']
             response_headers = [(k, v) for k, v in r.headers.items() if k.lower() not in excluded_headers]
 
             return Response(stream_with_context(generate()), content_type=content_type, headers=response_headers)
 
-        # Handle other content types with streaming
+        # Otros tipos de contenido
         return Response(
             stream_with_context(r.iter_content(chunk_size=1024)),
             content_type=content_type,
-            headers=[(k, v) for k, v in r.headers.items() 
-                    if k.lower() not in ['connection', 'transfer-encoding']]
+            headers=[(k, v) for k, v in r.headers.items() if k.lower() not in ['connection', 'transfer-encoding']]
         )
 
     except requests.exceptions.RequestException as e:
@@ -127,11 +179,11 @@ def um3u_proxy(url_path):
 
 @app.errorhandler(404)
 def not_found(error):
-    """Handle 404 errors with informative message"""
-    return render_template('index.html', 
-                         error="Ruta no encontrada. Use el proxy añadiendo la URL después del dominio.",
-                         host_url=request.host_url,
-                         base_url=BASE_URL_UM3U), 404
+    return render_template('index.html',
+                           error="Ruta no encontrada. Use el proxy añadiendo la URL después del dominio.",
+                           host_url=request.host_url,
+                           base_url=BASE_URL_UM3U), 404
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
